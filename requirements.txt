@@ -1,0 +1,5 @@
+flask
+requests
+google-genai>=0.4.0  # optional: only needed when using GEMINI
+gunicorn
+python-dotenv

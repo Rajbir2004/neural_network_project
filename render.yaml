@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: crewai-manual-trip-planner
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 3
+    envVars:
+      - key: LLM_MODE
+        sync: true
+      - key: GEMINI_API_KEY
+        sync: true
+      - key: GEMINI_MODEL
+        sync: true
