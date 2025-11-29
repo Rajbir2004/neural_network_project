@@ -44,58 +44,72 @@ except Exception:
 
 # Optional import for Gemini (google-genai). Only required if you enable Gemini.
 try:
-    import google.genai as genai
+    import google.generativeai as genai
 except Exception:
     genai = None
 
 app = Flask(__name__, template_folder='templates')
 
 LLM_MODE = os.environ.get("LLM_MODE", "gemini")  # "gemini" or "mock"
-# CORRECT — read the env var named GEMINI_API_KEY
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 class LLMAdapter:
     def __init__(self, mode: str = "mock"):
         self.mode = mode
+
         if mode == "gemini" and genai is None:
-            raise RuntimeError("google-genai SDK not available. Install google-genai or set LLM_MODE=mock.")
+            raise RuntimeError(
+                "google-generativeai SDK not available. Install google-generativeai or set LLM_MODE=mock."
+            )
+
         if mode == "gemini" and not GEMINI_API_KEY:
-            raise RuntimeError("GEMINI_API_KEY env var not set. Provide a valid Google API key or switch to mock mode.")
+            raise RuntimeError(
+                "GEMINI_API_KEY env var not set. Provide a valid Google API key or switch to mock mode."
+            )
+
         if mode == "gemini":
-            os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
-            self.client = genai.Client() if genai is not None else None
+            genai.configure(api_key=GEMINI_API_KEY)
+            self.client = genai
         else:
             self.client = None
 
     def generate(self, prompt: str, max_tokens: int = 512) -> str:
         if self.mode == "mock":
             if "outline" in prompt.lower():
-                return ("Day 1: Arrival, city walk, local dinner.\n"
-                        "Day 2: Museums and landmarks.\n"
-                        "Day 3: Day trip to nearby nature spot.\n")
-            if "detail day 1" in prompt.lower():
-                return ("09:00 Arrive, check-in\n11:00 Brunch at Cafe A\n14:00 City museum (2 hrs)\n19:00 Dinner at local restaurant\n")
+                return (
+                    "Day 1: Arrival, city walk, local dinner.\n"
+                    "Day 2: Museums and landmarks.\n"
+                    "Day 3: Day trip to nearby nature spot.\n"
+                )
+            if "detail day" in prompt.lower():
+                return (
+                    "09:00 Arrive, check-in\n"
+                    "11:00 Brunch at Cafe A\n"
+                    "14:00 City museum (2 hrs)\n"
+                    "19:00 Dinner at local restaurant\n"
+                )
             if "budget" in prompt.lower():
-                return ("Estimated total: 600 USD (flights 300, hotels 200, food & transport 100). Tips: book trains early.\n")
-            return "Generated (mock) response for prompt:\n" + (prompt[:500] + ("..." if len(prompt) > 500 else ""))
+                return (
+                    "Estimated total: 600 USD (flights 300, hotels 200, food & transport 100). Tips: book trains early.\n"
+                )
+            return "Generated (mock) response for prompt:\n" + (
+                prompt[:500] + ("..." if len(prompt) > 500 else "")
+            )
         else:
             if not self.client:
                 raise RuntimeError("Gemini client not initialized.")
-            resp = self.client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-            text = None
             try:
-                text = getattr(resp, 'text', None)
-                if not text:
-                    candidates = getattr(resp, 'candidates', None)
-                    if candidates:
-                        text = "".join([c.content.parts[0].text for c in candidates if c.content.parts])
-            except Exception:
-                text = str(resp)
-            return text or str(resp)
+                model = genai.GenerativeModel(GEMINI_MODEL)
+                resp = model.generate_content(prompt)
+                return resp.text if resp.text else str(resp)
+            except Exception as e:
+                raise RuntimeError(f"Gemini API error: {str(e)}")
+
 
 # --- Define the original agents as normal functions (keeps same functionality) ---
+
 
 def planner_fn(inputs: Dict[str, Any], llm: LLMAdapter) -> Dict[str, Any]:
     prompt = f"""You are a trip planner assistant.
@@ -105,6 +119,7 @@ Dates: {inputs.get('start_date')} to {inputs.get('end_date')}
 Interests: {inputs.get('interests')}
 Budget: {inputs.get('budget')}
 Output a short day-by-day outline labelled 'outline'."""
+
     outline = llm.generate("outline:\n" + prompt, max_tokens=400)
     return {"outline": outline}
 
@@ -114,6 +129,7 @@ def details_fn(inputs: Dict[str, Any], day_text: str, llm: LLMAdapter) -> Dict[s
 Day plan: {day_text}
 Destination: {inputs.get('destination')}
 Output a bullet/time-stamped list."""
+
     details = llm.generate("detail day: " + prompt, max_tokens=400)
     return {"details": details}
 
@@ -122,110 +138,51 @@ def budget_fn(inputs: Dict[str, Any], llm: LLMAdapter) -> Dict[str, Any]:
     prompt = f"""You are a budget assistant. Provide a short estimated budget and 3 cost-saving tips.
 Inputs: destination={inputs.get('destination')}, budget={inputs.get('budget')}
 Output: Estimated total and tips."""
+
     budget = llm.generate("budget:\n" + prompt, max_tokens=200)
     return {"budget": budget}
 
+
 # --- Wrap the functions into CrewAgent objects ---
 
+
 def make_agents(llm: LLMAdapter):
-    import inspect
-
-    """
-    Create planner/details/budget agents in a way that works both with:
-      - the local shim (CrewAgent(name, fn) style),
-      - real crewai packages that require keyword args or BaseModel-style init,
-      - and if all fails, a tiny compatibility wrapper that exposes .run().
-    """
-
-    def _make_single(name: str, fn_callable):
-        # Try the simplest (positional) first
-        try:
-            return CrewAgent(name, fn_callable)
-        except TypeError:
-            pass
-        except Exception:
-            # If CrewAgent raises something else (validation error), don't swallow it here
-            raise
-
-        # Try common keyword argument names used by some libs
-        kwargs_options = [
-            {'name': name, 'fn': fn_callable},
-            {'name': name, 'function': fn_callable},
-            {'name': name, 'callable': fn_callable},
-            {'id': name, 'fn': fn_callable},
-            {'agent_name': name, 'fn': fn_callable},
-        ]
-        for kw in kwargs_options:
-            try:
-                return CrewAgent(**kw)
-            except TypeError:
-                continue
-            except Exception:
-                # If CrewAgent raises something else (validation error), let caller see it
-                raise
-
-        # If still not created, attempt to inspect signature and call with matching params.
-        try:
-            sig = inspect.signature(CrewAgent)
-            params = sig.parameters
-            call_kwargs = {}
-            if 'name' in params:
-                call_kwargs['name'] = name
-            if 'fn' in params:
-                call_kwargs['fn'] = fn_callable
-            if 'function' in params and 'fn' not in call_kwargs:
-                call_kwargs['function'] = fn_callable
-            if call_kwargs:
-                try:
-                    return CrewAgent(**call_kwargs)
-                except Exception:
-                    pass
-        except (ValueError, TypeError):
-            # some builtins or C-extensions may not have inspectable signature
-            pass
-
-        # Last-resort: return a tiny wrapper object that has run()
-        class _WrappedAgent:
-            def __init__(self, agent_name, f):
-                self.name = agent_name
-                self.fn = f
-
-            def run(self, *args, **kwargs):
-                return self.fn(*args, **kwargs)
-
-        return _WrappedAgent(name, fn_callable)
-
-    # Create the three agents, binding llm into each callable
-    planner_agent = _make_single("planner", lambda inputs: planner_fn(inputs, llm))
-    details_agent = _make_single("details", lambda data: details_fn(data['inputs'], data['day_text'], llm))
-    budget_agent = _make_single("budget", lambda inputs: budget_fn(inputs, llm))
-
+    planner_agent = CrewAgent("planner", lambda inputs: planner_fn(inputs, llm))
+    details_agent = CrewAgent(
+        "details", lambda data: details_fn(data["inputs"], data["day_text"], llm)
+    )
+    budget_agent = CrewAgent("budget", lambda inputs: budget_fn(inputs, llm))
     return planner_agent, details_agent, budget_agent
 
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/plan', methods=['POST'])
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/plan", methods=["POST"])
 def plan():
     data = request.json or request.form
     inputs = {
-        'destination': data.get('destination',''),
-        'start_date': data.get('start_date',''),
-        'end_date': data.get('end_date',''),
-        'interests': data.get('interests',''),
-        'budget': data.get('budget',''),
+        "destination": data.get("destination", ""),
+        "start_date": data.get("start_date", ""),
+        "end_date": data.get("end_date", ""),
+        "interests": data.get("interests", ""),
+        "budget": data.get("budget", ""),
     }
 
     try:
         llm = LLMAdapter(mode=LLM_MODE)
     except Exception as e:
-        return jsonify({'error': 'llm_init_failed', 'detail': str(e)}), 500
+        return (
+            jsonify({"error": "llm_init_failed", "detail": str(e)}),
+            500,
+        )
 
     # Create agents (either real CrewAI agents or the shim above)
     planner_agent, details_agent, budget_agent = make_agents(llm)
 
-    # Create tasks and run via Crew object. We run planner first, then detail tasks, then budget.
+    # Create tasks and run via Crew object
     crew = Crew()
 
     # Task 1: planner
@@ -233,18 +190,25 @@ def plan():
     crew.add_task(task_planner)
 
     # Execute planner immediately to obtain outline for subsequent detail tasks
-    planner_res = task_planner.run() if hasattr(task_planner, 'run') else planner_agent.run(inputs)
-    outline_text = planner_res.get('outline', '') if isinstance(planner_res, dict) else str(planner_res)
+    planner_res = (
+        task_planner.run() if hasattr(task_planner, "run") else planner_agent.run(inputs)
+    )
+    outline_text = (
+        planner_res.get("outline", "")
+        if isinstance(planner_res, dict)
+        else str(planner_res)
+    )
 
     # Simple parsing: split outline into lines and generate details for first 5 lines
     days = [line.strip() for line in outline_text.splitlines() if line.strip()]
+
     day_details = []
     detail_tasks = []
 
     for i, day in enumerate(days[:5]):
-        # Build inputs for detail agent (we send a small dict so the agent signature is uniform)
-        detail_inputs = {'inputs': inputs, 'day_text': day}
-        t = CrewTask(agent=details_agent, inputs=detail_inputs, meta={'day_index': i})
+        # Build inputs for detail agent
+        detail_inputs = {"inputs": inputs, "day_text": day}
+        t = CrewTask(agent=details_agent, inputs=detail_inputs, day_index=i)
         detail_tasks.append(t)
         crew.add_task(t)
 
@@ -252,29 +216,40 @@ def plan():
     task_budget = CrewTask(agent=budget_agent, inputs=inputs)
     crew.add_task(task_budget)
 
-    # Run detail + budget tasks. In this simple implementation we run sequentially and collect outputs.
-    # If you have a real Crew implementation that supports parallelism and richer orchestration,
-    # it will take over here.
+    # Run detail + budget tasks
     for t in detail_tasks:
         res = t.run()
-        # res expected to be dict with 'details'
-        day_details.append({'day': t.inputs['day_text'], 'details': res.get('details') if isinstance(res, dict) else res})
+        day_details.append(
+            {
+                "day": t.inputs["day_text"],
+                "details": res.get("details") if isinstance(res, dict) else res,
+            }
+        )
 
     budget_res = task_budget.run()
-    budget_text = budget_res.get('budget') if isinstance(budget_res, dict) else budget_res
+    budget_text = budget_res.get("budget") if isinstance(budget_res, dict) else budget_res
 
     result = {
-        'inputs': inputs,
-        'outline': outline_text,
-        'day_details': day_details,
-        'budget': budget_text,
-        'meta': {
-            'llm_mode': LLM_MODE,
-            'gemini_model': GEMINI_MODEL if LLM_MODE=='gemini' else None,
-            'crewai_present': _CREWAI_AVAILABLE
-        }
+        "inputs": inputs,
+        "outline": outline_text,
+        "day_details": day_details,
+        "budget": budget_text,
+        "meta": {
+            "llm_mode": LLM_MODE,
+            "gemini_model": GEMINI_MODEL if LLM_MODE == "gemini" else None,
+            "crewai_present": _CREWAI_AVAILABLE,
+        },
     }
+
     return jsonify(result)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    debug_mode = os.environ.get("FLASK_ENV") == "development"
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
