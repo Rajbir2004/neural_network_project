@@ -12,23 +12,11 @@ except Exception:
 
 app = Flask(__name__, template_folder='templates')
 
-# ---------- Configuration ----------
-# Choose adapter: 'gemini' to use Google Gemini API (requires GEMINI_API_KEY),
-# or 'mock' to use a free deterministic local stub (no external API / no cost).
 LLM_MODE = os.environ.get("LLM_MODE", "gemini")  # "gemini" or "mock"
 # CORRECT — read the env var named GEMINI_API_KEY
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-  # set this in Render to use real Gemini
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
-# ---------- Simple manual "crew" implementation ----------
-# We'll create three agents:
-# 1) planner_agent: creates a high-level day-by-day outline
-# 2) details_agent: expands a single day into activities with times
-# 3) budget_agent: provides a simple budget summary / tips
-#
-# Each agent uses the same LLMAdapter interface below. This keeps everything
-# server-side (safer) and avoids depending on CrewAI hosted endpoints.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 class LLMAdapter:
     def __init__(self, mode: str = "mock"):
@@ -47,8 +35,7 @@ class LLMAdapter:
 
     def generate(self, prompt: str, max_tokens: int = 512) -> str:
         if self.mode == "mock":
-            # Very simple deterministic stub—keeps behavior free of cost.
-            # It parses the prompt for keywords and returns structured text.
+            
             if "outline" in prompt.lower():
                 return ("Day 1: Arrival, city walk, local dinner.\n"
                         "Day 2: Museums and landmarks.\n"
@@ -78,7 +65,7 @@ class LLMAdapter:
                 text = str(resp)
             return text or str(resp)
 
-# Agent implementations
+
 def planner_agent(inputs: Dict[str, Any], llm: LLMAdapter) -> Dict[str, Any]:
     prompt = f"""You are a trip planner assistant.
 Create a concise day-by-day outline for a trip.
