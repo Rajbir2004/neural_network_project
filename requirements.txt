@@ -3,3 +3,6 @@ requests
 google-genai>=0.4.0  # optional: only needed when using GEMINI
 gunicorn
 python-dotenv
+crewai>=0.28.0
+langchain-google-genai>=1.0.0
+google-generativeai>=0.3.0
