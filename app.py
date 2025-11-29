@@ -128,9 +128,78 @@ Output: Estimated total and tips."""
 # --- Wrap the functions into CrewAgent objects ---
 
 def make_agents(llm: LLMAdapter):
-    planner_agent = CrewAgent("planner", lambda inputs: planner_fn(inputs, llm))
-    details_agent = CrewAgent("details", lambda data: details_fn(data['inputs'], data['day_text'], llm))
-    budget_agent = CrewAgent("budget", lambda inputs: budget_fn(inputs, llm))
+    import inspect
+
+    """
+    Create planner/details/budget agents in a way that works both with:
+      - the local shim (CrewAgent(name, fn) style),
+      - real crewai packages that require keyword args or BaseModel-style init,
+      - and if all fails, a tiny compatibility wrapper that exposes .run().
+    """
+
+    def _make_single(name: str, fn_callable):
+        # Try the simplest (positional) first
+        try:
+            return CrewAgent(name, fn_callable)
+        except TypeError:
+            pass
+        except Exception:
+            # If CrewAgent raises something else (validation error), don't swallow it here
+            raise
+
+        # Try common keyword argument names used by some libs
+        kwargs_options = [
+            {'name': name, 'fn': fn_callable},
+            {'name': name, 'function': fn_callable},
+            {'name': name, 'callable': fn_callable},
+            {'id': name, 'fn': fn_callable},
+            {'agent_name': name, 'fn': fn_callable},
+        ]
+        for kw in kwargs_options:
+            try:
+                return CrewAgent(**kw)
+            except TypeError:
+                continue
+            except Exception:
+                # If CrewAgent raises something else (validation error), let caller see it
+                raise
+
+        # If still not created, attempt to inspect signature and call with matching params.
+        try:
+            sig = inspect.signature(CrewAgent)
+            params = sig.parameters
+            call_kwargs = {}
+            if 'name' in params:
+                call_kwargs['name'] = name
+            if 'fn' in params:
+                call_kwargs['fn'] = fn_callable
+            if 'function' in params and 'fn' not in call_kwargs:
+                call_kwargs['function'] = fn_callable
+            if call_kwargs:
+                try:
+                    return CrewAgent(**call_kwargs)
+                except Exception:
+                    pass
+        except (ValueError, TypeError):
+            # some builtins or C-extensions may not have inspectable signature
+            pass
+
+        # Last-resort: return a tiny wrapper object that has run()
+        class _WrappedAgent:
+            def __init__(self, agent_name, f):
+                self.name = agent_name
+                self.fn = f
+
+            def run(self, *args, **kwargs):
+                return self.fn(*args, **kwargs)
+
+        return _WrappedAgent(name, fn_callable)
+
+    # Create the three agents, binding llm into each callable
+    planner_agent = _make_single("planner", lambda inputs: planner_fn(inputs, llm))
+    details_agent = _make_single("details", lambda data: details_fn(data['inputs'], data['day_text'], llm))
+    budget_agent = _make_single("budget", lambda inputs: budget_fn(inputs, llm))
+
     return planner_agent, details_agent, budget_agent
 
 @app.route('/')
